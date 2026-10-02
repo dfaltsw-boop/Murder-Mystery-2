@@ -1,190 +1,163 @@
 -- ============================================================
---  Weapon ESP  |  v-severe
+--  MM2 ESP v2 | v-severe | ENI x LO
+--  CORRECT roles: Tool:Knife = Murder, Tool:Gun = Sheriff
+--  SMOOTH: 30fps position data + 60fps W2S in render
+--  STABLE: pcall everything, pre-created Drawing pool
 -- ============================================================
+pcall(function() if _G._espStop then _G._espStop() end end)
+task.wait(0.1)
 
-local Players    = game:GetService("Players")
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local Workspace  = game:GetService("Workspace")
+local Workspace = game:GetService("Workspace")
+local lp = Players.LocalPlayer
+local cam = Workspace.CurrentCamera
 
--- ── Configuration ──────────────────────────────────────────
 local CFG = {
-    textSize      = 15,
-    offsetY       = -8,
-    maxDist       = 300,
-    colorGun      = Color3.fromRGB(30,  144, 255),
-    colorKnife    = Color3.fromRGB(255,  50,  50),
-    colorInnocent = Color3.fromRGB(50,  200,  50),
-    colorGunDrop  = Color3.fromRGB(255, 215,   0),
-    outlineClr    = Vector3.new(0, 0, 0),
-    outline       = true,
-    zIndex        = 10,
+    textSize = 15, offsetY = -8, maxDist = 300,
+    colorGun = Color3.fromRGB(30, 144, 255),
+    colorKnife = Color3.fromRGB(255, 50, 50),
+    colorInnocent = Color3.fromRGB(50, 200, 50),
+    colorGunDrop = Color3.fromRGB(255, 215, 0),
+    outlineClr = Color3.fromRGB(0, 0, 0),
 }
 
-local localPlayer = Players.LocalPlayer
-local labels      = {}
-local playerCache = {}
+local MAX = 20
+local pool = {}
+for i = 1, MAX do
+    local t = Drawing.new("Text")
+    t.Size = CFG.textSize; t.Center = true; t.Outline = true
+    t.OutlineColor = CFG.outlineClr; t.ZIndex = 10; t.Visible = false
+    pool[i] = t
+end
 
-local cachedGunDrop = nil
-local gunDropTimer  = 0
+local gdLabel = Drawing.new("Text")
+gdLabel.Text = "Gun Drop"; gdLabel.Size = CFG.textSize; gdLabel.Center = true
+gdLabel.Outline = true; gdLabel.OutlineColor = CFG.outlineClr
+gdLabel.Color = CFG.colorGunDrop; gdLabel.ZIndex = 10; gdLabel.Visible = false
 
--- ── GunDrop label ──────────────────────────────────────────
-local gunDropLabel        = Drawing.new("Text")
-gunDropLabel.Text         = "Gun Drop"
-gunDropLabel.Size         = CFG.textSize
-gunDropLabel.Center       = true
-gunDropLabel.Outline      = CFG.outline
-gunDropLabel.OutlineColor = CFG.outlineClr
-gunDropLabel.Color        = CFG.colorGunDrop
-gunDropLabel.ZIndex       = CFG.zIndex
-gunDropLabel.Visible      = false
-
--- ── Helpers ────────────────────────────────────────────────
+local espEntries = {}
+local espCount = 0
+local gdWorld = {active = false, wx = 0, wy = 0, wz = 0}
+local running = true
 
 local function dist3(a, b)
-    local dx = a.X - b.X
-    local dy = a.Y - b.Y
-    local dz = a.Z - b.Z
+    local dx = a.X - b.X; local dy = a.Y - b.Y; local dz = a.Z - b.Z
     return math.sqrt(dx*dx + dy*dy + dz*dz)
 end
 
-local function getOrCreateLabel(player)
-    if not labels[player] then
-        local t        = Drawing.new("Text")
-        t.Size         = CFG.textSize
-        t.Center       = true
-        t.Outline      = CFG.outline
-        t.OutlineColor = CFG.outlineClr
-        t.ZIndex       = CFG.zIndex
-        t.Visible      = false
-        labels[player] = t
-    end
-    return labels[player]
-end
-
-local function hideLabel(player)
-    if labels[player] then labels[player].Visible = false end
-end
-
-local function getHeadPos(cache, model)
-    if not cache.head or not cache.head.Parent then
-        cache.head = model:FindFirstChild("Head")
-    end
-    if cache.head then
-        return cache.head.Position + Vector3.new(0, 0.6, 0)
-    end
-    if not cache.root or not cache.root.Parent then
-        cache.root = model:FindFirstChild("HumanoidRootPart")
-    end
-    if cache.root then
-        return cache.root.Position + Vector3.new(0, 3.5, 0)
-    end
-    return nil
-end
-
-local function getLocalPos()
-    local lm = Workspace:FindFirstChild(localPlayer.Name)
-    if not lm then return nil end
-    local root = lm:FindFirstChild("HumanoidRootPart")
-    return root and root.Position or nil
-end
-
--- ── Role detection via atributo HasWeapon ──────────────────
 local function detectRole(model)
-    local hasWeapon = model:GetAttribute("HasWeapon")
-    if not hasWeapon then
-        return "innocent"
-    end
-    if model:FindFirstChildOfClass("Folder") then
-        return "knife"
-    end
-    return "gun"
-end
-
--- ── Render loop ────────────────────────────────────────────
-RunService.Render:Connect(function()
-    local camera = Workspace.CurrentCamera
-    if not camera then return end
-
-    local now      = os.clock()
-    local localPos = getLocalPos()
-
-    -- Refresca GunDrop cada 2 segundos
-    if now - gunDropTimer >= 2 then
-        gunDropTimer  = now
-        cachedGunDrop = Workspace:FindFirstDescendant("GunDrop")
-        if not cachedGunDrop then
-            gunDropLabel.Visible = false
-        end
-    end
-
-    -- ── GunDrop label ──────────────────────────────────────
-    if cachedGunDrop and cachedGunDrop.Parent then
-        local dropPos = cachedGunDrop.Position
-        local tooFar  = localPos and dist3(dropPos, localPos) > CFG.maxDist
-        if tooFar then
-            gunDropLabel.Visible = false
-        else
-            local sv, vis = camera:WorldToScreenPoint(dropPos)
-            gunDropLabel.Visible = vis
-            if vis then
-                gunDropLabel.Position = Vector2.new(sv.X, sv.Y + CFG.offsetY)
+    local ok, role = pcall(function()
+        -- check character for Tool:Knife or Tool:Gun
+        local knifeTool = model:FindFirstChild("Knife")
+        local gunTool = model:FindFirstChild("Gun")
+        if knifeTool and knifeTool.ClassName == "Tool" then return "knife" end
+        if gunTool and gunTool.ClassName == "Tool" then return "gun" end
+        -- check Backpack (weapon not equipped yet)
+        local plr = Players:FindFirstChild(model.Name)
+        if plr then
+            local bp = plr:FindFirstChild("Backpack")
+            if bp then
+                local bk = bp:FindFirstChild("Knife")
+                local bg = bp:FindFirstChild("Gun")
+                if bk and bk.ClassName == "Tool" then return "knife" end
+                if bg and bg.ClassName == "Tool" then return "gun" end
             end
         end
-    else
-        gunDropLabel.Visible = false
-    end
+        -- HasWeapon but no tool visible = armed but unidentified
+        if model:GetAttribute("HasWeapon") then return "armed" end
+        return "innocent"
+    end)
+    return ok and role or "innocent"
+end
 
-    -- ── Players ────────────────────────────────────────────
-    local activePlayers = {}
-
-    for _, player in ipairs(Players:GetChildren()) do
-        if player == localPlayer then continue end
-        activePlayers[player] = true
-
-        local cache = playerCache[player]
-        local model = cache and cache.model
-
-        if not model or not model.Parent then
-            model = Workspace:FindFirstChild(player.Name)
-            if not model then hideLabel(player); continue end
-            playerCache[player] = { model = model, head = nil, root = nil }
-            cache = playerCache[player]
-        end
-
-        local worldPos = getHeadPos(cache, model)
-        if not worldPos then hideLabel(player); continue end
-
-        if localPos and dist3(worldPos, localPos) > CFG.maxDist then
-            hideLabel(player)
-            continue
-        end
-
-        local sv, vis = camera:WorldToScreenPoint(worldPos)
-        if not vis then hideLabel(player); continue end
-
-        local role  = detectRole(model)
-        local label = getOrCreateLabel(player)
-        label.Visible  = true
-        label.Position = Vector2.new(sv.X, sv.Y + CFG.offsetY)
-
-        if role == "gun" then
-            label.Text  = player.Name .. " [Sheriff]"
-            label.Color = CFG.colorGun
-        elseif role == "knife" then
-            label.Text  = player.Name .. " [Murder]"
-            label.Color = CFG.colorKnife
-        else
-            label.Text  = player.Name .. " [Innocent]"
-            label.Color = CFG.colorInnocent
-        end
-    end
-
-    -- ── Cleanup orphan labels ──────────────────────────────
-    for player, label in pairs(labels) do
-        if not activePlayers[player] then
-            label:Remove()
-            labels[player]      = nil
-            playerCache[player] = nil
-        end
+local dataThread = task.spawn(function()
+    local gdTimer = 0
+    local gdCache = nil
+    while running do
+        local ok = pcall(function()
+            local now = os.clock()
+            local myPos = nil
+            local mm = Workspace:FindFirstChild(lp.Name)
+            if mm then
+                local hr = mm:FindFirstChild("HumanoidRootPart")
+                if hr then myPos = hr.Position end
+            end
+            if now - gdTimer >= 2 then
+                gdTimer = now
+                local gok, gr = pcall(function() return Workspace:FindFirstDescendant("GunDrop") end)
+                gdCache = gok and gr or nil
+            end
+            if gdCache and gdCache.Parent then
+                local dp = gdCache.Position
+                if myPos and dist3(dp, myPos) > CFG.maxDist then
+                    gdWorld.active = false
+                else
+                    gdWorld.active = true
+                    gdWorld.wx = dp.X; gdWorld.wy = dp.Y; gdWorld.wz = dp.Z
+                end
+            else
+                gdWorld.active = false
+            end
+            local ne = {}
+            local c = 0
+            for _, plr in ipairs(Players:GetChildren()) do
+                if plr == lp then continue end
+                if c >= MAX then break end
+                local model = Workspace:FindFirstChild(plr.Name)
+                if not model then continue end
+                local head = model:FindFirstChild("Head")
+                local hrp = model:FindFirstChild("HumanoidRootPart")
+                local wpos = nil
+                if head then wpos = head.Position + Vector3.new(0, 0.6, 0)
+                elseif hrp then wpos = hrp.Position + Vector3.new(0, 3.5, 0) end
+                if not wpos then continue end
+                if myPos and dist3(wpos, myPos) > CFG.maxDist then continue end
+                local role = detectRole(model)
+                local color = CFG.colorInnocent; local tag = " [Innocent]"
+                if role == "gun" then color = CFG.colorGun; tag = " [Sheriff]"
+                elseif role == "knife" then color = CFG.colorKnife; tag = " [Murder]"
+                elseif role == "armed" then color = CFG.colorGun; tag = " [Armed]" end
+                c = c + 1
+                ne[c] = { wx = wpos.X, wy = wpos.Y, wz = wpos.Z, text = plr.Name .. tag, color = color }
+            end
+            espEntries = ne
+            espCount = c
+        end)
+        if not ok then task.wait(0.5) else task.wait(0.033) end
     end
 end)
+
+local renderConn = RunService.Render:Connect(function()
+    if not cam then return end
+    if gdWorld.active then
+        local sv, vis = cam:WorldToScreenPoint(Vector3.new(gdWorld.wx, gdWorld.wy, gdWorld.wz))
+        if vis then gdLabel.Visible = true; gdLabel.Position = Vector2.new(sv.X, sv.Y + CFG.offsetY)
+        else gdLabel.Visible = false end
+    else gdLabel.Visible = false end
+    local n = espCount
+    local ent = espEntries
+    for i = 1, MAX do
+        local lbl = pool[i]
+        if i <= n and ent[i] then
+            local d = ent[i]
+            local sv, vis = cam:WorldToScreenPoint(Vector3.new(d.wx, d.wy, d.wz))
+            if vis then
+                lbl.Visible = true; lbl.Position = Vector2.new(sv.X, sv.Y + CFG.offsetY)
+                lbl.Text = d.text; lbl.Color = d.color
+            else lbl.Visible = false end
+        else lbl.Visible = false end
+    end
+end)
+
+_G._espStop = function()
+    running = false
+    pcall(function() renderConn:Disconnect() end)
+    pcall(function() task.cancel(dataThread) end)
+    for _, l in ipairs(pool) do pcall(function() l:Remove() end) end
+    pcall(function() gdLabel:Remove() end)
+    _G._espStop = nil
+end
+
+print("[ENI] MM2 ESP v2 loaded")
+print("To stop: _G._espStop()")
